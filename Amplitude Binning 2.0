@@ -1,0 +1,189 @@
+import numpy as np
+import matplotlib.pyplot as plt
+from scipy.signal import find_peaks
+import random
+
+def smooth_and_center_signal(signal, smoothing=20):
+    smoothed_signal = np.convolve(signal, np.ones(smoothing) / smoothing, mode='same')
+    centered_signal = smoothed_signal - np.median(smoothed_signal)
+    return centered_signal
+
+def filter_peaks(signal, threshold=0.4):
+    peaks, _ = find_peaks(signal)
+    vals, _ = find_peaks(-signal)
+
+    if vals[0] > peaks[0]:
+        peaks = peaks[1:]
+        vals = vals[:-1]
+
+    if peaks.size > vals.size:
+        peaks = peaks[:-1]
+    elif vals.size > peaks.size:
+        vals = vals[:-1]
+
+    up_slope_height = -1 * (signal[vals] - signal[peaks])
+    down_slope_height = signal[peaks[:-1]] - signal[vals[1:]]
+
+    all_slopes = np.concatenate((up_slope_height, down_slope_height))
+    max_tidal_volume = np.max(all_slopes)
+
+    low_up_slopes = (up_slope_height < threshold * max_tidal_volume)
+    low_down_slopes = (down_slope_height < threshold * max_tidal_volume)
+    low_down_slopes = np.append(low_down_slopes, False)
+
+    exclude_points = np.zeros_like(signal, dtype=bool)
+    for i in np.argwhere(low_up_slopes):
+        i = i[0]
+        exclude_points[vals[i]:peaks[i]] = True
+
+    for i in np.argwhere(low_down_slopes):
+        i = i[0]
+        exclude_points[peaks[i]:vals[i + 1]] = True
+
+    return exclude_points
+
+def remove_excluded_points(signal, exclude_points):
+    filtered_signal = np.copy(signal)
+    filtered_signal[exclude_points] = np.nan  # Set excluded points to NaN
+    return filtered_signal
+
+def adjust_bin_size(bin_elements, desired_size):
+    if len(bin_elements) > desired_size:
+        return random.sample(bin_elements, desired_size)
+    elif len(bin_elements) < desired_size:
+        return random.choices(bin_elements, k=desired_size)
+    return bin_elements
+
+# Load the signal data
+signal = np.load('motion264.npy')
+flattened_signal = signal.flatten()
+
+start_index = 7500
+end_index = 20000
+
+# Select the signal segment from 7500 to 20000
+signal_segment = flattened_signal[start_index:end_index]
+print("Length of the signal:", len(signal_segment))
+
+window_size = 70
+smoothed_signal = smooth_and_center_signal(signal_segment, smoothing=window_size)
+
+exclude_points = filter_peaks(smoothed_signal, threshold=0.4)
+filtered_signal = remove_excluded_points(smoothed_signal, exclude_points)
+
+num_bins = 3  
+desired_bin_size = 3500
+colors = plt.cm.tab20(np.linspace(0, 1, num_bins * 2))
+
+plt.figure(figsize=(14, 12))
+
+# Plot original signal
+plt.subplot(4, 1, 1)
+plt.plot(np.arange(start_index, end_index), signal_segment, color='blue')
+plt.title('Original Signal')
+plt.ylabel('Amplitude')
+
+# Plot smoothed signal
+plt.subplot(4, 1, 2)
+plt.plot(np.arange(start_index, end_index), filtered_signal, color='orange')
+plt.title('Smoothed and Centered Signal')
+plt.ylabel('Amplitude')
+
+bin_indices = {f'Exhalation Bin {i}': [] for i in range(1, num_bins-1)}
+bin_indices.update({f'Inhalation Bin {i}': [] for i in range(1, num_bins-1)})
+
+combined_0th_bin_indices = []
+combined_max_bin_indices = []
+
+plt.subplot(4, 1, 3)
+
+peaks, _ = find_peaks(filtered_signal)
+troughs, _ = find_peaks(-filtered_signal)
+
+for i in range(len(peaks) - 1):
+    cycle_start = peaks[i]
+    cycle_end = peaks[i + 1]
+    if cycle_end <= cycle_start:
+        continue
+
+    cycle_segment = filtered_signal[cycle_start:cycle_end]
+    exhalation_segment = cycle_segment[:len(cycle_segment) // 2]
+    inhalation_segment = cycle_segment[len(cycle_segment) // 2:]
+
+    min_value = np.nanmin(cycle_segment)
+    max_value = np.nanmax(cycle_segment)
+    num_middle_bins = num_bins - 2
+
+    middle_bin_width = (max_value - min_value) / (num_middle_bins + 1)
+    first_last_bin_width = middle_bin_width / 2
+
+    bin_edges = [min_value]
+    bin_edges.append(bin_edges[-1] + first_last_bin_width)
+    for j in range(num_middle_bins):
+        bin_edges.append(bin_edges[-1] + middle_bin_width)
+    bin_edges.append(max_value)
+
+    exhalation_bin_indices_array = np.digitize(exhalation_segment, bin_edges) - 1
+    inhalation_bin_indices_array = np.digitize(inhalation_segment, bin_edges) - 1
+
+    for j in range(1, num_bins-1):
+        bin_indices[f'Exhalation Bin {j}'].extend(np.where(exhalation_bin_indices_array == j)[0] + cycle_start + start_index)
+        bin_indices[f'Inhalation Bin {j}'].extend(np.where(inhalation_bin_indices_array == j)[0] + cycle_start + len(exhalation_segment) + start_index)
+
+    combined_0th_bin_indices.extend(np.where(exhalation_bin_indices_array == 0)[0] + cycle_start + start_index)
+    combined_0th_bin_indices.extend(np.where(inhalation_bin_indices_array == 0)[0] + cycle_start + len(exhalation_segment) + start_index)
+    combined_max_bin_indices.extend(np.where(exhalation_bin_indices_array == (num_bins-1))[0] + cycle_start + start_index)
+    combined_max_bin_indices.extend(np.where(inhalation_bin_indices_array == (num_bins-1))[0] + cycle_start + len(exhalation_segment) + start_index)
+
+    for j in range(1, num_bins-1):
+        plt.plot(np.arange(len(exhalation_segment))[exhalation_bin_indices_array == j] + cycle_start + start_index,
+                 exhalation_segment[exhalation_bin_indices_array == j], '.', color=colors[j-1])
+        plt.plot(np.arange(len(inhalation_segment))[inhalation_bin_indices_array == j] + cycle_start + len(exhalation_segment) + start_index,
+                 inhalation_segment[inhalation_bin_indices_array == j], '.', color=colors[num_bins + j - 1])
+
+# Ensure indices are within the specified range
+combined_0th_bin_indices = [index for index in adjust_bin_size(combined_0th_bin_indices, desired_bin_size) if start_index <= index <= end_index]
+combined_max_bin_indices = [index for index in adjust_bin_size(combined_max_bin_indices, desired_bin_size) if start_index <= index <= end_index]
+
+plt.scatter(combined_0th_bin_indices, filtered_signal[np.array(combined_0th_bin_indices) - start_index], color='black', s=8)
+plt.scatter(combined_max_bin_indices, filtered_signal[np.array(combined_max_bin_indices) - start_index], color='green', linewidth=3, s=2)
+plt.title('Binned Signal by Position')
+plt.ylabel('Amplitude')
+
+plt.subplot(4, 1, 4)
+plot_data = []
+tick_labels = []
+
+plot_data.append(combined_0th_bin_indices)
+tick_labels.append('Combined 0th Bin')
+
+respiration_dict = {}
+bin_number = 1
+for j in range(1, num_bins-1):
+    exhalation_bin_indices = adjust_bin_size(bin_indices[f'Exhalation Bin {j}'], desired_bin_size)
+    inhalation_bin_indices = adjust_bin_size(bin_indices[f'Inhalation Bin {j}'], desired_bin_size)
+    respiration_dict[f'Bin {bin_number}'] = exhalation_bin_indices
+    bin_number += 1
+    respiration_dict[f'Bin {bin_number}'] = inhalation_bin_indices
+    bin_number += 1
+    plot_data.append(exhalation_bin_indices)
+    tick_labels.append(f'Ex Bin {j}')
+    plot_data.append(inhalation_bin_indices)
+    tick_labels.append(f'In Bin {j}')
+
+bp = plt.boxplot(plot_data, patch_artist=True)
+
+for patch, color in zip(bp['boxes'], colors):
+    patch.set_facecolor(color)
+
+for i, data in enumerate(plot_data, start=1):
+    count = len(data)
+    plt.text(i, np.max(data) if count > 0 else 0, str(count), horizontalalignment='center', verticalalignment='bottom')
+
+plt.xticks(ticks=np.arange(1, len(tick_labels)+1), labels=tick_labels, rotation=45)
+plt.title('Box Plot of Binned Sampling Indices')
+plt.ylabel('Sampling Index')
+plt.tight_layout()
+plt.show()
+
+np.save('adjusted_amplitude_binned_positions.npy', {'Bin 0': combined_0th_bin_indices, **respiration_dict, f'Bin {num_bins}': combined_max_bin_indices})
